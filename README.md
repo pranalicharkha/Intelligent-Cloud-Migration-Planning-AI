@@ -59,5 +59,4 @@ The project's configuration can be managed through environment variables and con
 Contributing
 We welcome contributions to improve Intelligent Cloud Migration Planning. Please refer to our `CONTRIBUTING.md` file for guidelines on how to get involved.
 
-License
-This project is licensed under the MIT License. See the `LICENSE` file for details.
+.
