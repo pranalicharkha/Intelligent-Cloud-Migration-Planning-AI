@@ -1,0 +1,7 @@
+# Cost & Risk Simulator (Role 6) - Python 3.10+
+numpy>=1.24          # Monte-Carlo simulation
+boto3>=1.28          # AWS Price List Query API (T1/T2; optional at runtime - the module degrades gracefully without it)
+pytest>=7.0          # test suite only
+
+# Dev convenience (optional, not imported by the module):
+# pypdf              # extracting the project brief PDFs

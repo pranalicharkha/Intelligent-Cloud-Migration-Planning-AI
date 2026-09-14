@@ -1,0 +1,41 @@
+{
+  "applications": [
+    {
+      "app_id": "APP_001",
+      "app_name": "Legacy Core Billing",
+      "recommended_instance": "m5.large",
+      "storage_gb": 250,
+      "app_age_years": 12,
+      "dependency_count": 7,
+      "has_compliance_data": true,
+      "compliance_frameworks": ["PCI"],
+      "is_deprecated_tech": true,
+      "tech_stack": "Java 6 / WebLogic",
+      "criticality": "mission-critical"
+    },
+    {
+      "app_id": "APP_002",
+      "app_name": "User Notification Service",
+      "recommended_instance": "t3.medium",
+      "storage_gb": 30,
+      "app_age_years": 2,
+      "dependency_count": 1,
+      "has_compliance_data": false,
+      "is_deprecated_tech": false,
+      "tech_stack": "Python 3.11 / FastAPI",
+      "criticality": "low"
+    },
+    {
+      "app_id": "APP_003",
+      "app_name": "Analytics Warehouse",
+      "recommended_instance": "r5.2xlarge",
+      "storage_gb": 900,
+      "app_age_years": 6,
+      "dependency_count": 3,
+      "has_compliance_data": false,
+      "is_deprecated_tech": false,
+      "tech_stack": "PostgreSQL 12",
+      "criticality": "business-critical"
+    }
+  ]
+}
