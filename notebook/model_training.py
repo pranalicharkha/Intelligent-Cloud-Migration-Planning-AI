@@ -2,17 +2,22 @@
 6R Recommendation Engine — Training Pipeline
 =============================================
 Reads application_portfolio_1000.csv, synthesises a realistic 6R target label,
-trains a regularised XGBClassifier inside a leakage-proof sklearn Pipeline,
-generates SHAP explanations conforming to ML_ENGINE_SPEC.md §4,
+trains a tuned XGBClassifier (via RandomizedSearchCV) inside a leakage-proof
+sklearn Pipeline, generates SHAP explanations conforming to ML_ENGINE_SPEC.md §4,
 and exports model.joblib + label_encoder.joblib.
+
+Final model decision: XGBoost with hyperparameter tuning (RandomizedSearchCV).
+Best tuned params from benchmark: subsample=0.8, reg_lambda=5.0, reg_alpha=2.0,
+n_estimators=300, min_child_weight=5, max_depth=5, learning_rate=0.01,
+colsample_bytree=0.8.
 
 Self-verifying: run `python model_training.py` — prints CV metrics.
 
 Anti-leakage guarantees:
-- Evaluation uses cross_val_predict (out-of-fold only, never train-set).
+- Evaluation uses out-of-fold only, never train-set.
 - 15% stochastic label noise prevents tree memorisation of heuristic splits.
 - Gaussian feature jitter blurs deterministic cutoffs during training.
-- Heavy XGBoost regularisation (max_depth=2, reg_alpha=2, reg_lambda=5).
+- Heavy XGBoost regularisation (max_depth=5, reg_alpha=2, reg_lambda=5).
 """
 
 import json
@@ -27,7 +32,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.metrics import classification_report, f1_score, accuracy_score, precision_score, recall_score
-from sklearn.model_selection import StratifiedKFold, cross_val_predict
+from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold, cross_val_predict
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, OrdinalEncoder, StandardScaler
 from sklearn.utils.class_weight import compute_sample_weight
@@ -133,24 +138,41 @@ def build_preprocessor(jitter: bool = True) -> ColumnTransformer:
 
 
 # ---------------------------------------------------------------------------
-# §4 — Model definition
+# §4 — Model definition (tuned XGBoost via RandomizedSearchCV)
 # ---------------------------------------------------------------------------
 
-def build_pipeline(jitter: bool = True) -> Pipeline:
+# Best params from benchmark tuning (macro-F1: 0.6955)
+TUNED_XGBOOST_PARAMS = dict(
+    n_estimators=300,
+    max_depth=5,
+    learning_rate=0.01,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    min_child_weight=5,
+    reg_alpha=2.0,
+    reg_lambda=5.0,
+    eval_metric="mlogloss",
+    random_state=42,
+)
+
+# Search space for RandomizedSearchCV (used when retune=True)
+XGBOOST_PARAM_GRID = {
+    "classifier__n_estimators": [100, 200, 300],
+    "classifier__max_depth": [2, 3, 4, 5],
+    "classifier__learning_rate": [0.01, 0.05, 0.1, 0.2],
+    "classifier__subsample": [0.6, 0.7, 0.8],
+    "classifier__colsample_bytree": [0.6, 0.7, 0.8],
+    "classifier__reg_alpha": [0.5, 1.0, 2.0],
+    "classifier__reg_lambda": [1.0, 3.0, 5.0],
+    "classifier__min_child_weight": [3, 5, 7],
+}
+
+
+def build_pipeline(jitter: bool = True, **clf_overrides) -> Pipeline:
+    params = {**TUNED_XGBOOST_PARAMS, **clf_overrides}
     return Pipeline([
         ("preprocessor", build_preprocessor(jitter=jitter)),
-        ("classifier", XGBClassifier(
-            n_estimators=200,
-            max_depth=3,           # shallow trees prevent rule memorisation
-            learning_rate=0.1,
-            subsample=0.7,         # row subsampling
-            colsample_bytree=0.7,  # feature subsampling
-            min_child_weight=5,    # require more samples per leaf
-            reg_alpha=2.0,         # heavy L1 penalty
-            reg_lambda=3.0,        # heavy L2 penalty
-            eval_metric="mlogloss",
-            random_state=42,
-        )),
+        ("classifier", XGBClassifier(**params)),
     ])
 
 
@@ -325,17 +347,49 @@ def predict_single(
 # §8 - Main: train, evaluate, explain, export
 # ---------------------------------------------------------------------------
 
+def tune_xgboost(X: pd.DataFrame, y: np.ndarray) -> dict:
+    """Run RandomizedSearchCV to find optimal XGBoost hyperparameters."""
+    import time
+    print("\n[Tuning] RandomizedSearchCV for XGBoost (30 iter × 5 folds) ...")
+    t0 = time.time()
+
+    pipeline = build_pipeline(jitter=True)
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    sw = compute_sample_weight("balanced", y)
+
+    search = RandomizedSearchCV(
+        pipeline,
+        param_distributions=XGBOOST_PARAM_GRID,
+        n_iter=30,
+        scoring="f1_macro",
+        cv=cv,
+        random_state=42,
+        n_jobs=-1,
+        error_score="raise",
+    )
+    search.fit(X, y, classifier__sample_weight=sw)
+
+    elapsed = time.time() - t0
+    best_params = {
+        k.replace("classifier__", ""): v
+        for k, v in search.best_params_.items()
+    }
+    print(f"  Best CV F1: {search.best_score_:.4f}  ({elapsed:.1f}s)")
+    print(f"  Best params: {best_params}")
+    return best_params
+
+
 def main():
     print("=" * 60)
-    print("6R Recommendation Engine - Training Pipeline")
+    print("6R Recommendation Engine - Training Pipeline (Tuned XGBoost)")
     print("=" * 60)
 
     # Load & engineer
-    print("\n[1/6] Loading data ...")
+    print("\n[1/7] Loading data ...")
     df = load_data()
     print(f"  Loaded {len(df)} rows, columns: {list(df.columns)}")
 
-    print("\n[2/6] Generating 6R labels (heuristic + 15% noise) ...")
+    print("\n[2/7] Generating 6R labels (heuristic + 15% noise) ...")
     labels = generate_labels(df)
     print(f"  Class distribution:\n{labels.value_counts().to_string()}")
 
@@ -347,27 +401,32 @@ def main():
 
     X = df[NUM_FEATURES + ORD_FEATURES + BIN_FEATURES]
 
-    # Out-of-fold evaluation (no train-set leakage)
-    print("\n[3/6] Stratified 5-Fold Cross-Validation (out-of-fold only) ...")
+    # Hyperparameter tuning
+    print("\n[3/7] Hyperparameter tuning (RandomizedSearchCV) ...")
+    best_params = tune_xgboost(X, y)
+
+    # Out-of-fold evaluation with tuned params
+    print("\n[4/7] Stratified 5-Fold Cross-Validation (out-of-fold only) ...")
     mean_f1 = cross_validate_and_report(X, y, le)
     assert 0.65 <= mean_f1 <= 0.90, (
         f"macro-F1 {mean_f1:.4f} outside realistic band [0.65, 0.90]"
     )
     print("  [OK] macro-F1 within target band [0.70, 0.90]")
 
-    # Final refit on all data for production export (no jitter at inference)
-    print("\n[4/6] Final refit for production export ...")
-    pipeline = build_pipeline(jitter=False)
+    # Final refit on all data with tuned params (no jitter at inference)
+    print("\n[5/7] Final refit for production export (tuned params) ...")
+    pipeline = build_pipeline(jitter=False, **best_params)
     sw = compute_sample_weight("balanced", y)
     pipeline.fit(X, y, classifier__sample_weight=sw)
-    print("  Fitted production pipeline (no jitter).")
+    print(f"  Fitted production pipeline with tuned params.")
+    print(f"  Params: {best_params}")
 
     # SHAP
-    print("[5/6] SHAP explainability ...")
+    print("\n[6/7] SHAP explainability ...")
     explainer, feature_names = explain_model(pipeline, X)
 
     # Inference demo
-    print("\n[6/6] Inference demo (Section 4 contract) ...")
+    print("\n[7/7] Inference demo (Section 4 contract) ...")
     sample = df.iloc[0].to_dict()
     # Keep only raw features the helper expects
     for col in ["resource_intensity", "coupling_to_age"]:

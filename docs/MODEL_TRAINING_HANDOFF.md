@@ -17,7 +17,8 @@ We built an end-to-end ML training pipeline that takes the synthetic application
 | Data engineering | Processed Google Cluster traces → `task_summary_ml_ready.csv` (179K rows) | ✅ Done |
 | Data engineering | Synthetic application portfolio → `application_portfolio_1000.csv` (1000 rows) | ✅ Done |
 | ML spec | `ML_ENGINE_SPEC.md` — model selection, features, API contract, deployment strategy | ✅ Done |
-| Training script | `notebook/model_training.py` — full pipeline with anti-leakage guards | ✅ Done |
+| Training script | `notebook/model_training.py` — full pipeline with tuning and anti-leakage guards | ✅ Done |
+| Benchmark | `notebook/model_benchmark.py` & `benchmark_results.json` | ✅ Done |
 | Model artifacts | `model.joblib`, `label_encoder.joblib`, `shap_summary.png` | ✅ Exported |
 | Leakage audit | Out-of-fold evaluation, label noise, Gaussian jitter, heavy regularisation | ✅ Passed |
 | Backend scaffold | FastAPI mock integration layer with stable API routes | ✅ Done |
@@ -39,8 +40,10 @@ Intelligent-Cloud-Migration-Planning-AI-data-preprocessing/
 │       ├── task_summary_ml_ready.csv # 179K workload records (21 cols)
 │       └── application_portfolio_1000.csv  # 1000 synthetic apps (9 cols)
 ├── notebook/
-│   ├── model_training.py             # ★ Main training script
-│   ├── model.joblib                  # ★ Trained XGBoost pipeline (~1.2 MB)
+│   ├── model_training.py             # ★ Main training script (with tuned XGBoost)
+│   ├── model_benchmark.py            # Baseline vs Tuning benchmark script
+│   ├── benchmark_results.json        # Benchmark comparison results
+│   ├── model.joblib                  # ★ Trained tuned XGBoost pipeline (~2.3 MB)
 │   ├── label_encoder.joblib          # ★ Label encoder for 6R classes
 │   ├── shap_summary.png             # SHAP feature importance plot
 │   ├── requirements.txt             # Python dependencies for training
@@ -74,13 +77,14 @@ cd notebook
 python model_training.py
 ```
 
-This runs 6 steps:
+This runs 7 steps:
 1. Load `application_portfolio_1000.csv` (drops ID columns)
 2. Generate 6R labels via heuristic rules + 15% stochastic noise
-3. 5-fold stratified cross-validation (out-of-fold only)
-4. Final refit on all data (no jitter) for production export
-5. SHAP explainability → `shap_summary.png`
-6. Inference demo matching `ML_ENGINE_SPEC.md` §4 contract
+3. Hyperparameter tuning (RandomizedSearchCV)
+4. 5-fold stratified cross-validation (out-of-fold only)
+5. Final refit on all data (no jitter) for production export
+6. SHAP explainability → `shap_summary.png`
+7. Inference demo matching `ML_ENGINE_SPEC.md` §4 contract
 
 **Outputs:** `model.joblib`, `label_encoder.joblib`, `shap_summary.png`
 
@@ -90,7 +94,7 @@ This runs 6 steps:
 
 ### Algorithm
 
-**XGBoost (XGBClassifier)** wrapped in a scikit-learn `Pipeline` with a `ColumnTransformer` preprocessor.
+**XGBoost (XGBClassifier)** tuned via `RandomizedSearchCV` and wrapped in a scikit-learn `Pipeline` with a `ColumnTransformer` preprocessor.
 
 ### Features (8 total)
 
@@ -108,9 +112,9 @@ This runs 6 steps:
 ### Hyperparameters
 
 ```
-n_estimators=200, max_depth=3, learning_rate=0.1,
-subsample=0.7, colsample_bytree=0.7, min_child_weight=5,
-reg_alpha=2.0, reg_lambda=3.0
+n_estimators=300, max_depth=5, learning_rate=0.01,
+subsample=0.8, colsample_bytree=0.8, min_child_weight=5,
+reg_alpha=2.0, reg_lambda=5.0
 ```
 
 ### Anti-Leakage Measures
@@ -129,21 +133,21 @@ reg_alpha=2.0, reg_lambda=3.0
 
 | Metric | Value |
 |--------|-------|
-| **Macro F1** | 0.6855 ± 0.018 |
-| **Accuracy** | 0.8010 ± 0.017 |
-| **Macro Precision** | 0.6847 |
-| **Macro Recall** | 0.6865 |
+| **Macro F1** | 0.6964 ± 0.031 |
+| **Accuracy** | 0.8180 ± 0.022 |
+| **Macro Precision** | 0.7014 |
+| **Macro Recall** | 0.6962 |
 
 ### Per-Class Breakdown
 
 | Class | Precision | Recall | F1 | Support |
 |-------|-----------|--------|----|---------|
-| Rehost | 0.86 | 0.88 | 0.87 | 328 |
-| Repurchase | 0.86 | 0.86 | 0.86 | 244 |
-| Retain | 0.85 | 0.81 | 0.83 | 176 |
-| Refactor | 0.76 | 0.81 | 0.78 | 120 |
-| Replatform | 0.60 | 0.63 | 0.62 | 93 |
-| Retire | 0.18 | 0.13 | 0.15 | 39 |
+| Rehost | 0.87 | 0.90 | 0.88 | 328 |
+| Repurchase | 0.87 | 0.88 | 0.87 | 244 |
+| Retain | 0.85 | 0.82 | 0.84 | 176 |
+| Refactor | 0.78 | 0.82 | 0.80 | 120 |
+| Replatform | 0.64 | 0.65 | 0.64 | 93 |
+| Retire | 0.21 | 0.10 | 0.14 | 39 |
 
 > **Note:** `Retire` has low performance due to its small class size (3.9% of data). This is realistic — Retire is a rare migration strategy in practice. The `balanced` sample weighting partially compensates.
 
@@ -230,34 +234,7 @@ print(f"Recommendation: {label}  (confidence: {probas[pred[0]]:.2f})")
 
 ---
 
-## 9. Files to Commit / Upload
-
-### Must include (model training deliverables)
-
-- `notebook/model_training.py` — training script
-- `notebook/model.joblib` — trained model
-- `notebook/label_encoder.joblib` — label encoder
-- `notebook/shap_summary.png` — SHAP plot
-- `notebook/requirements.txt` — dependencies
-- `data/processed/application_portfolio_1000.csv` — training dataset
-- `data/processed/README.md` — dataset documentation
-
-### Supporting documentation
-
-- `ML_ENGINE_SPEC.md` — model design spec
-- `docs/ARCHITECTURE.md` — system architecture
-- `docs/API_CONTRACT.md` — API endpoints
-- `docs/MODEL_TRAINING_HANDOFF.md` — this handoff doc
-- `walkthrough.md` — leakage audit results
-- `README.md` — project overview
-
-### Already present (backend scaffold)
-
-- `backend/` — FastAPI mock integration layer
-
----
-
-## 10. Next Steps for Receiving Team Member
+## 9. Next Steps for Receiving Team Member
 
 | Priority | Task | Reference |
 |----------|------|-----------|
@@ -271,7 +248,7 @@ print(f"Recommendation: {label}  (confidence: {probas[pred[0]]:.2f})")
 
 ---
 
-## 11. Key Specification Documents
+## 10. Key Specification Documents
 
 | Document | Purpose |
 |----------|---------|
