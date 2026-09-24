@@ -1,0 +1,437 @@
+{
+  "default": [
+    {
+      "model": "Random Forest",
+      "macro_f1": 0.6817,
+      "accuracy": 0.826,
+      "macro_precision": 0.7031,
+      "macro_recall": 0.6844,
+      "cv_f1_mean": 0.6823,
+      "cv_f1_std": 0.0365,
+      "cv_acc_mean": 0.826,
+      "cv_acc_std": 0.0252,
+      "per_class": {
+        "Refactor": {
+          "precision": 0.7903,
+          "recall": 0.8167,
+          "f1-score": 0.8033,
+          "support": 120.0
+        },
+        "Rehost": {
+          "precision": 0.8468,
+          "recall": 0.9268,
+          "f1-score": 0.885,
+          "support": 328.0
+        },
+        "Replatform": {
+          "precision": 0.6707,
+          "recall": 0.5914,
+          "f1-score": 0.6286,
+          "support": 93.0
+        },
+        "Repurchase": {
+          "precision": 0.8583,
+          "recall": 0.8934,
+          "f1-score": 0.8755,
+          "support": 244.0
+        },
+        "Retain": {
+          "precision": 0.8523,
+          "recall": 0.8523,
+          "f1-score": 0.8523,
+          "support": 176.0
+        },
+        "Retire": {
+          "precision": 0.2,
+          "recall": 0.0256,
+          "f1-score": 0.0455,
+          "support": 39.0
+        }
+      }
+    },
+    {
+      "model": "XGBoost",
+      "macro_f1": 0.6846,
+      "accuracy": 0.801,
+      "macro_precision": 0.6847,
+      "macro_recall": 0.6865,
+      "cv_f1_mean": 0.6855,
+      "cv_f1_std": 0.0184,
+      "cv_acc_mean": 0.801,
+      "cv_acc_std": 0.0166,
+      "per_class": {
+        "Refactor": {
+          "precision": 0.7578,
+          "recall": 0.8083,
+          "f1-score": 0.7823,
+          "support": 120.0
+        },
+        "Rehost": {
+          "precision": 0.8593,
+          "recall": 0.875,
+          "f1-score": 0.8671,
+          "support": 328.0
+        },
+        "Replatform": {
+          "precision": 0.602,
+          "recall": 0.6344,
+          "f1-score": 0.6178,
+          "support": 93.0
+        },
+        "Repurchase": {
+          "precision": 0.8642,
+          "recall": 0.8607,
+          "f1-score": 0.8624,
+          "support": 244.0
+        },
+        "Retain": {
+          "precision": 0.8462,
+          "recall": 0.8125,
+          "f1-score": 0.829,
+          "support": 176.0
+        },
+        "Retire": {
+          "precision": 0.1786,
+          "recall": 0.1282,
+          "f1-score": 0.1493,
+          "support": 39.0
+        }
+      }
+    },
+    {
+      "model": "LightGBM",
+      "macro_f1": 0.682,
+      "accuracy": 0.801,
+      "macro_precision": 0.6828,
+      "macro_recall": 0.6834,
+      "cv_f1_mean": 0.6844,
+      "cv_f1_std": 0.0165,
+      "cv_acc_mean": 0.801,
+      "cv_acc_std": 0.0159,
+      "per_class": {
+        "Refactor": {
+          "precision": 0.7698,
+          "recall": 0.8083,
+          "f1-score": 0.7886,
+          "support": 120.0
+        },
+        "Rehost": {
+          "precision": 0.8627,
+          "recall": 0.8811,
+          "f1-score": 0.8718,
+          "support": 328.0
+        },
+        "Replatform": {
+          "precision": 0.5758,
+          "recall": 0.6129,
+          "f1-score": 0.5938,
+          "support": 93.0
+        },
+        "Repurchase": {
+          "precision": 0.8689,
+          "recall": 0.8689,
+          "f1-score": 0.8689,
+          "support": 244.0
+        },
+        "Retain": {
+          "precision": 0.8343,
+          "recall": 0.8011,
+          "f1-score": 0.8174,
+          "support": 176.0
+        },
+        "Retire": {
+          "precision": 0.1852,
+          "recall": 0.1282,
+          "f1-score": 0.1515,
+          "support": 39.0
+        }
+      }
+    },
+    {
+      "model": "Logistic Regression",
+      "macro_f1": 0.5276,
+      "accuracy": 0.584,
+      "macro_precision": 0.5199,
+      "macro_recall": 0.5561,
+      "cv_f1_mean": 0.5276,
+      "cv_f1_std": 0.0319,
+      "cv_acc_mean": 0.584,
+      "cv_acc_std": 0.0307,
+      "per_class": {
+        "Refactor": {
+          "precision": 0.5223,
+          "recall": 0.6833,
+          "f1-score": 0.5921,
+          "support": 120.0
+        },
+        "Rehost": {
+          "precision": 0.6667,
+          "recall": 0.4512,
+          "f1-score": 0.5382,
+          "support": 328.0
+        },
+        "Replatform": {
+          "precision": 0.4328,
+          "recall": 0.6237,
+          "f1-score": 0.511,
+          "support": 93.0
+        },
+        "Repurchase": {
+          "precision": 0.6323,
+          "recall": 0.5779,
+          "f1-score": 0.6039,
+          "support": 244.0
+        },
+        "Retain": {
+          "precision": 0.7842,
+          "recall": 0.8466,
+          "f1-score": 0.8142,
+          "support": 176.0
+        },
+        "Retire": {
+          "precision": 0.0811,
+          "recall": 0.1538,
+          "f1-score": 0.1062,
+          "support": 39.0
+        }
+      }
+    }
+  ],
+  "tuned": [
+    {
+      "model": "Random Forest",
+      "macro_f1": 0.6882,
+      "accuracy": 0.823,
+      "macro_precision": 0.698,
+      "macro_recall": 0.691,
+      "cv_f1_mean": 0.6887,
+      "cv_f1_std": 0.0339,
+      "cv_acc_mean": 0.823,
+      "cv_acc_std": 0.0223,
+      "per_class": {
+        "Refactor": {
+          "precision": 0.7903,
+          "recall": 0.8167,
+          "f1-score": 0.8033,
+          "support": 120.0
+        },
+        "Rehost": {
+          "precision": 0.8592,
+          "recall": 0.9116,
+          "f1-score": 0.8846,
+          "support": 328.0
+        },
+        "Replatform": {
+          "precision": 0.6413,
+          "recall": 0.6344,
+          "f1-score": 0.6378,
+          "support": 93.0
+        },
+        "Repurchase": {
+          "precision": 0.864,
+          "recall": 0.8852,
+          "f1-score": 0.8745,
+          "support": 244.0
+        },
+        "Retain": {
+          "precision": 0.8514,
+          "recall": 0.8466,
+          "f1-score": 0.849,
+          "support": 176.0
+        },
+        "Retire": {
+          "precision": 0.1818,
+          "recall": 0.0513,
+          "f1-score": 0.08,
+          "support": 39.0
+        }
+      },
+      "best_params": {
+        "n_estimators": 300,
+        "min_samples_split": 10,
+        "min_samples_leaf": 2,
+        "max_features": 0.5,
+        "max_depth": 10
+      },
+      "tuning_time_s": 16.8
+    },
+    {
+      "model": "XGBoost",
+      "macro_f1": 0.6955,
+      "accuracy": 0.818,
+      "macro_precision": 0.7014,
+      "macro_recall": 0.6962,
+      "cv_f1_mean": 0.6964,
+      "cv_f1_std": 0.0307,
+      "cv_acc_mean": 0.818,
+      "cv_acc_std": 0.0225,
+      "per_class": {
+        "Refactor": {
+          "precision": 0.7795,
+          "recall": 0.825,
+          "f1-score": 0.8016,
+          "support": 120.0
+        },
+        "Rehost": {
+          "precision": 0.8651,
+          "recall": 0.8994,
+          "f1-score": 0.8819,
+          "support": 328.0
+        },
+        "Replatform": {
+          "precision": 0.6383,
+          "recall": 0.6452,
+          "f1-score": 0.6417,
+          "support": 93.0
+        },
+        "Repurchase": {
+          "precision": 0.8669,
+          "recall": 0.8811,
+          "f1-score": 0.874,
+          "support": 244.0
+        },
+        "Retain": {
+          "precision": 0.848,
+          "recall": 0.8239,
+          "f1-score": 0.8357,
+          "support": 176.0
+        },
+        "Retire": {
+          "precision": 0.2105,
+          "recall": 0.1026,
+          "f1-score": 0.1379,
+          "support": 39.0
+        }
+      },
+      "best_params": {
+        "subsample": 0.8,
+        "reg_lambda": 5.0,
+        "reg_alpha": 2.0,
+        "n_estimators": 300,
+        "min_child_weight": 5,
+        "max_depth": 5,
+        "learning_rate": 0.01,
+        "colsample_bytree": 0.8
+      },
+      "tuning_time_s": 6.5
+    },
+    {
+      "model": "LightGBM",
+      "macro_f1": 0.6954,
+      "accuracy": 0.814,
+      "macro_precision": 0.7024,
+      "macro_recall": 0.6941,
+      "cv_f1_mean": 0.6931,
+      "cv_f1_std": 0.0372,
+      "cv_acc_mean": 0.814,
+      "cv_acc_std": 0.018,
+      "per_class": {
+        "Refactor": {
+          "precision": 0.7951,
+          "recall": 0.8083,
+          "f1-score": 0.8017,
+          "support": 120.0
+        },
+        "Rehost": {
+          "precision": 0.8622,
+          "recall": 0.8963,
+          "f1-score": 0.8789,
+          "support": 328.0
+        },
+        "Replatform": {
+          "precision": 0.6105,
+          "recall": 0.6237,
+          "f1-score": 0.617,
+          "support": 93.0
+        },
+        "Repurchase": {
+          "precision": 0.8589,
+          "recall": 0.873,
+          "f1-score": 0.8659,
+          "support": 244.0
+        },
+        "Retain": {
+          "precision": 0.8497,
+          "recall": 0.8352,
+          "f1-score": 0.8424,
+          "support": 176.0
+        },
+        "Retire": {
+          "precision": 0.2381,
+          "recall": 0.1282,
+          "f1-score": 0.1667,
+          "support": 39.0
+        }
+      },
+      "best_params": {
+        "subsample": 0.8,
+        "reg_lambda": 3.0,
+        "reg_alpha": 0.5,
+        "num_leaves": 31,
+        "n_estimators": 100,
+        "max_depth": 7,
+        "learning_rate": 0.05,
+        "colsample_bytree": 0.7
+      },
+      "tuning_time_s": 29.3
+    },
+    {
+      "model": "Logistic Regression",
+      "macro_f1": 0.53,
+      "accuracy": 0.586,
+      "macro_precision": 0.5223,
+      "macro_recall": 0.5573,
+      "cv_f1_mean": 0.5298,
+      "cv_f1_std": 0.0307,
+      "cv_acc_mean": 0.586,
+      "cv_acc_std": 0.0306,
+      "per_class": {
+        "Refactor": {
+          "precision": 0.5325,
+          "recall": 0.6833,
+          "f1-score": 0.5985,
+          "support": 120.0
+        },
+        "Rehost": {
+          "precision": 0.6652,
+          "recall": 0.4543,
+          "f1-score": 0.5399,
+          "support": 328.0
+        },
+        "Replatform": {
+          "precision": 0.4394,
+          "recall": 0.6237,
+          "f1-score": 0.5156,
+          "support": 93.0
+        },
+        "Repurchase": {
+          "precision": 0.6283,
+          "recall": 0.582,
+          "f1-score": 0.6043,
+          "support": 244.0
+        },
+        "Retain": {
+          "precision": 0.7884,
+          "recall": 0.8466,
+          "f1-score": 0.8164,
+          "support": 176.0
+        },
+        "Retire": {
+          "precision": 0.08,
+          "recall": 0.1538,
+          "f1-score": 0.1053,
+          "support": 39.0
+        }
+      },
+      "best_params": {
+        "solver": "saga",
+        "penalty": "l2",
+        "max_iter": 1000,
+        "C": 10.0
+      },
+      "tuning_time_s": 0.3
+    }
+  ],
+  "best_model": "XGBoost",
+  "best_macro_f1": 0.6955
+}

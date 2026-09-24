@@ -4,3 +4,5 @@ xgboost
 shap
 joblib
 numpy
+lightgbm
+matplotlib
