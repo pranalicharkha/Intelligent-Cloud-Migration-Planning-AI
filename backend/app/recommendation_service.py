@@ -34,7 +34,7 @@ def _build_model_feature_row(application: Application) -> dict[str, Any]:
     criticality = application.criticality or "Medium"
     compliance_flag = int(application.compliance_flag) if application.compliance_flag is not None else 0
 
-    row = {
+    return {
         "cpu_usage": cpu_usage,
         "memory_usage": memory_usage,
         "age_years": age_years,
@@ -44,7 +44,6 @@ def _build_model_feature_row(application: Application) -> dict[str, Any]:
         "resource_intensity": cpu_usage * memory_usage,
         "coupling_to_age": dependency_count / (age_years + 1),
     }
-    return row
 
 
 class RecommendationAdapter:
@@ -78,15 +77,17 @@ class RecommendationAdapter:
             self.model_loaded = False
             self.load_error = f"Unable to load Member 3 recommendation model: {exc}"
 
-    def predict(self, application: Application) -> dict[str, Any]:
-        if self.model_loaded and self.pipeline is not None and self.label_encoder is not None:
-            return self._predict_with_model(application)
+    def _ensure_loaded(self) -> None:
+        if not self.model_loaded or self.pipeline is None or self.label_encoder is None:
+            raise RuntimeError(self.load_error or "Recommendation model is unavailable.")
 
-        return self._fallback_recommendation(application)
+    def predict(self, application: Application) -> dict[str, Any]:
+        self._ensure_loaded()
+        return self._predict_with_model(application)
 
     def _predict_with_model(self, application: Application) -> dict[str, Any]:
         row = _build_model_feature_row(application)
-        df = pd.DataFrame([row])
+        df = pd.DataFrame([row], columns=MODEL_FEATURES)
 
         preprocessor = self.pipeline.named_steps["preprocessor"]
         classifier = self.pipeline.named_steps["classifier"]
@@ -96,97 +97,61 @@ class RecommendationAdapter:
         pred_idx = int(np.argmax(probas))
         pred_label = self.label_encoder.inverse_transform([pred_idx])[0]
 
-        shap_values = shap.TreeExplainer(classifier).shap_values(X_t)
-        if isinstance(shap_values, list):
-            shap_for_pred = shap_values[pred_idx][0]
-        else:
-            shap_for_pred = shap_values[0, :, pred_idx]
-
-        top_indices = np.argsort(np.abs(shap_for_pred))[::-1][:2]
-        top_contributors = []
-        for idx in top_indices:
-            feature_name = MODEL_FEATURES[idx]
-            original_value = df.iloc[0][feature_name]
-            top_contributors.append(
-                {
-                    "feature": feature_name,
-                    "impact": f"{shap_for_pred[idx]:+.2f}",
-                    "value": str(original_value),
-                }
-            )
-
-        summary_parts = []
-        for contributor in top_contributors:
-            direction = "high" if float(contributor["impact"]) > 0 else "low"
-            summary_parts.append(f"{contributor['feature']} is {direction} ({contributor['value']})")
-        summary = f"Recommended for {pred_label} primarily because {' and '.join(summary_parts)}."
+        top_contributors: list[dict[str, str]] = []
+        shap_available = False
+        shap_summary = "SHAP values not available for this prediction."
+        try:
+            shap_values = shap.TreeExplainer(classifier).shap_values(X_t)
+            if isinstance(shap_values, list):
+                shap_for_pred = shap_values[pred_idx][0]
+            else:
+                shap_for_pred = shap_values[0, :, pred_idx]
+            top_indices = np.argsort(np.abs(shap_for_pred))[::-1][:2]
+            for idx in top_indices:
+                feature_name = MODEL_FEATURES[idx]
+                original_value = df.iloc[0][feature_name]
+                top_contributors.append(
+                    {
+                        "feature": feature_name,
+                        "impact": f"{shap_for_pred[idx]:+.2f}",
+                        "value": str(original_value),
+                    }
+                )
+            shap_available = True
+            summary_parts = []
+            for contributor in top_contributors:
+                direction = "high" if float(contributor["impact"]) > 0 else "low"
+                summary_parts.append(f"{contributor['feature']} is {direction} ({contributor['value']})")
+            shap_summary = f"Recommended for {pred_label} primarily because {' and '.join(summary_parts)}."
+        except Exception:
+            shap_available = False
+            shap_summary = "SHAP was available in the model artifact but could not be generated for this request."
 
         probability_map = {
-            cls: round(float(probas[i]), 2) for i, cls in enumerate(self.label_encoder.classes_)
+            str(cls): round(float(probas[i]), 2) for i, cls in enumerate(self.label_encoder.classes_)
         }
 
         explanation = {
-            "model": "member_3_6r_random_forest",
+            "model": "member_3_6r_xgboost",
             "source": self.model_path,
             "features": row,
             "top_features": [contributor["feature"] for contributor in top_contributors],
             "top_contributors": top_contributors,
             "probabilities": probability_map,
-            "summary": summary,
+            "summary": shap_summary,
             "shap": {
-                "available": True,
+                "available": shap_available,
                 "top_contributors": top_contributors,
-                "summary": summary,
+                "summary": shap_summary,
+                "note": "Actual SHAP values generated from the trained Member 3 model." if shap_available else "SHAP generation failed for this request.",
             },
         }
 
         return {
-            "recommendation": pred_label,
+            "recommendation": str(pred_label),
             "confidence": float(round(float(probas[pred_idx]), 2)),
             "explanation": explanation,
         }
-
-    def _fallback_recommendation(self, application: Application) -> dict[str, Any]:
-        if application.age_years is not None and application.age_years >= 12:
-            recommendation = "Retain"
-        elif application.criticality == "High" and (application.cpu_usage or 0) >= 0.7:
-            recommendation = "Refactor"
-        elif application.dependency_count >= 3:
-            recommendation = "Replatform"
-        elif application.compliance_flag == 1:
-            recommendation = "Repurchase"
-        elif application.cpu_usage is not None and application.cpu_usage >= 0.8:
-            recommendation = "Rehost"
-        else:
-            recommendation = "Replatform"
-
-        return {
-            "recommendation": recommendation,
-            "confidence": self._confidence_for(application),
-            "explanation": {
-                "model": "fallback_heuristic",
-                "source": "degraded_mode",
-                "summary": (
-                    f"Model failed to load for {application.id}; the backend returned a controlled "
-                    "fallback recommendation instead of the real Member 3 model result."
-                ),
-                "top_features": ["criticality", "dependency_count", "cpu_usage", "age_years"],
-                "shap": {
-                    "available": False,
-                    "note": "No SHAP was generated because the trained model could not be loaded.",
-                },
-            },
-        }
-
-    def _confidence_for(self, application: Application) -> float:
-        score = 0.55
-        if application.criticality == "High":
-            score += 0.1
-        if application.age_years is not None:
-            score += min(0.15, application.age_years / 100)
-        if application.dependency_count:
-            score += min(0.1, application.dependency_count / 20)
-        return round(min(score, 0.94), 2)
 
 
 adapter = RecommendationAdapter()
@@ -208,6 +173,11 @@ def get_recommendation(application_id: str) -> RecommendationResponse:
 
     try:
         prediction = adapter.predict(application)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
     except Exception as exc:  # pragma: no cover - surfaced via HTTP error
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
