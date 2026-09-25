@@ -28,6 +28,10 @@ from cost import (
     analyze_application,
     analyze_portfolio,
     calculate_risk_score,
+    default_recommended_instance,
+    fetch_backend_applications,
+    normalize_app_payload,
+    parse_csv_portfolio,
     run_monte_carlo_simulation,
 )
 
@@ -458,8 +462,243 @@ class TestCache:
 
 
 # ----------------------------------------------------------------------------
-# CLI
+# Backend / CSV / fixture integration (live dataset payloads)
 # ----------------------------------------------------------------------------
+
+# Record shape produced by backend GET /applications (backend/app/models.py)
+BACKEND_APP = {
+    "id": "app-004",
+    "name": "Legacy Batch Processor",
+    "owner": "Operations",
+    "technology": "COBOL / Mainframe",
+    "criticality": "Low",
+    "dependencies": ["app-001", "app-002", "app-003", "app-005"],
+}
+
+# Row shape produced by data/processed/application_portfolio_1000.csv
+CSV_ROW = {
+    "application_id": "APP001",
+    "application_name": "incentivize holistic bandwidth",
+    "cpu_usage": "0.76",
+    "memory_usage": "0.64",
+    "age_years": "15",
+    "criticality": "Low",
+    "compliance_flag": "1",
+    "dependency_ids": "APP089,APP635,APP387",
+    "dependency_count": "5",
+}
+
+
+class TestPayloadNormalization:
+    def test_backend_record_maps_to_canonical_schema(self):
+        app = normalize_app_payload(dict(BACKEND_APP))
+        assert app["app_id"] == "app-004"
+        assert app["app_name"] == "Legacy Batch Processor"
+        assert app["tech_stack"] == "COBOL / Mainframe"
+        assert app["dependency_count"] == 4  # derived from the dependency list
+
+    def test_backend_record_sniffs_deprecated_cobol(self):
+        app = normalize_app_payload(dict(BACKEND_APP))
+        assert app["is_deprecated_tech"] is True
+
+    def test_backend_record_without_signal_gets_default_instance(self):
+        app = normalize_app_payload({"id": "app-001", "name": "Customer Portal"})
+        assert app["recommended_instance"] == "t3.medium"
+
+    def test_csv_row_maps_to_canonical_schema(self):
+        app = normalize_app_payload(dict(CSV_ROW))
+        assert app["app_id"] == "APP001"
+        assert app["app_name"] == "incentivize holistic bandwidth"
+        assert app["app_age_years"] == "15"
+        assert app["dependency_count"] == "5"
+        assert app["has_compliance_data"] is True  # "1" -> True
+
+    def test_csv_row_derives_instance_from_utilization(self):
+        app = normalize_app_payload(dict(CSV_ROW))  # cpu 0.76 -> 60-80% band
+        assert app["recommended_instance"] == "m5.large"
+
+    def test_very_heavy_row_derives_m5_xlarge(self):
+        app = normalize_app_payload({"app_id": "APP100", "cpu_usage": "0.92",
+                                     "memory_usage": "0.88"})
+        assert app["recommended_instance"] == "m5.xlarge"
+
+    def test_native_schema_passes_through_unchanged(self):
+        app = normalize_app_payload(dict(HIGH_APP))
+        assert app["recommended_instance"] == "m5.large"
+        assert app["app_age_years"] == 12
+        assert app["dependency_count"] == 7
+        assert app["has_compliance_data"] is True
+
+    def test_string_false_flag_is_not_compliant(self):
+        app = normalize_app_payload({"app_id": "X", "compliance_flag": "false"})
+        assert app["has_compliance_data"] is False
+
+    def test_non_dict_payload_raises(self):
+        with pytest.raises(TypeError):
+            normalize_app_payload(["not", "a", "dict"])
+
+
+class TestInstanceSizing:
+    def test_no_signal_defaults_to_t3_medium(self):
+        assert default_recommended_instance(None, None) == "t3.medium"
+
+    def test_light_workload_gets_burstable(self):
+        assert default_recommended_instance(0.19, 0.10) == "t3.small"
+
+    def test_moderate_workload_gets_t3_medium(self):
+        assert default_recommended_instance(0.50, 0.40) == "t3.medium"
+
+    def test_heavy_workload_gets_memory_optimized(self):
+        assert default_recommended_instance(0.90, 0.85) == "m5.xlarge"
+
+    def test_percent_strings_are_understood(self):
+        assert default_recommended_instance("90%", "10%") == "m5.xlarge"
+        assert default_recommended_instance("20%", "5%") == "t3.small"
+
+    def test_cost_module_utilization_bounds(self):
+        assert cost._utilization("76%") == 0.76
+        assert cost._utilization(0.64) == 0.64
+        assert cost._utilization(90) == 0.90
+        assert cost._utilization("junk") == 0.0
+
+
+class TestBackendFetch:
+    @staticmethod
+    def _fake_urlopen(monkeypatch, body, status_ok=True):
+        class FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return json.dumps(body).encode("utf-8")
+
+        def fake_urlopen(req, timeout=0, context=None):
+            if not status_ok:
+                raise urllib.error.URLError("connection refused")
+            return FakeResp()
+
+        monkeypatch.setattr(cost.urllib.request, "urlopen", fake_urlopen)
+
+    def test_fetch_parses_bare_list(self, monkeypatch):
+        self._fake_urlopen(monkeypatch, [dict(BACKEND_APP)])
+        apps = fetch_backend_applications("http://127.0.0.1:8000")
+        assert apps and apps[0]["id"] == "app-004"
+
+    def test_fetch_parses_wrapped_dict(self, monkeypatch):
+        self._fake_urlopen(monkeypatch, {"applications": [dict(BACKEND_APP)]})
+        apps = fetch_backend_applications("http://127.0.0.1:8000")
+        assert apps and apps[0]["name"] == "Legacy Batch Processor"
+
+    def test_fetch_failure_returns_none(self, monkeypatch):
+        self._fake_urlopen(monkeypatch, [], status_ok=False)
+        assert fetch_backend_applications("http://127.0.0.1:9999") is None
+
+    def test_fetch_bad_json_returns_none(self, monkeypatch):
+        class FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b"{not json"
+
+        monkeypatch.setattr(cost.urllib.request, "urlopen",
+                            lambda req, timeout=0, context=None: FakeResp())
+        assert fetch_backend_applications("http://127.0.0.1:8000") is None
+
+    def test_fetch_empty_list_returns_none(self, monkeypatch):
+        self._fake_urlopen(monkeypatch, [])
+        assert fetch_backend_applications("http://127.0.0.1:8000") is None
+
+
+class TestRiskBackendPayloads:
+    def test_backend_record_scores_dependencies_from_list(self):
+        r = calculate_risk_score(dict(BACKEND_APP))  # raw payload, no normalization
+        pts = {f["category"]: f["points"] for f in r["risk_factors"] if f["points"] > 0}
+        assert pts["dependencies"] == 15  # 4-item list -> moderate coupling (2-4)
+        assert pts["deprecated_tech"] == 15  # COBOL sniffed from technology text
+
+    def test_csv_row_scores_via_alias_fields(self):
+        r = calculate_risk_score(dict(CSV_ROW))  # age_years / compliance_flag aliases
+        pts = {f["category"]: f["points"] for f in r["risk_factors"] if f["points"] > 0}
+        assert pts["tech_age"] == 30
+        assert pts["dependencies"] == 30
+        assert pts["compliance"] == 25
+
+    def test_backend_criticality_low_adds_no_points(self):
+        r = calculate_risk_score(dict(BACKEND_APP))
+        cats = {f["category"] for f in r["risk_factors"] if f["points"] > 0}
+        assert "criticality" not in cats  # "Low" is not a bonus tier
+
+
+class TestAnalyzeBackendPayloads:
+    def test_backend_record_end_to_end(self, offline_resolver):
+        out = analyze_application(dict(BACKEND_APP), resolver=offline_resolver)
+        assert out["app_id"] == "app-004"
+        assert out["app_name"] == "Legacy Batch Processor"
+        # Backend records carry no age/compliance fields, so the score reflects
+        # only what the data supports: deps 15 + COBOL 15 = 30 -> LOW band
+        assert out["risk_assessment"]["risk_score"] == 30
+        assert out["risk_assessment"]["risk_level"] == "LOW"
+        assert out["cost_simulation_monthly"]["expected_mean_usd"] > 0
+        assert "Legacy Batch Processor" in out["summary_for_copilot"]
+
+    def test_csv_row_end_to_end(self, offline_resolver):
+        out = analyze_application(dict(CSV_ROW), resolver=offline_resolver)
+        assert out["app_id"] == "APP001"
+        assert out["target_aws_instance"] == "m5.large"  # cpu 0.76 -> 60-80% band
+        assert out["risk_assessment"]["risk_score"] >= 75  # age 30 + deps 30 + compliance 25
+
+    def test_output_stays_json_serializable(self, offline_resolver):
+        for payload in (BACKEND_APP, CSV_ROW):
+            blob = json.dumps(analyze_application(dict(payload), resolver=offline_resolver))
+            assert isinstance(blob, str)
+
+
+class TestFixtureFallback:
+    def test_fixture_loads_and_analyzes(self, offline_resolver):
+        apps, source = cost._default_portfolio()
+        assert "fixture" in source
+        assert [a["app_id"] for a in apps] == ["APP_001", "APP_002", "APP_003"]
+        results = [analyze_application(a, resolver=offline_resolver) for a in apps]
+        assert all(r["cost_simulation_monthly"]["expected_mean_usd"] > 0 for r in results)
+        assert results[0]["risk_assessment"]["risk_level"] == "HIGH"  # APP_001 stays risky
+
+    def test_backend_down_falls_back_to_fixture(self, monkeypatch, offline_resolver):
+        # Simulate an unreachable backend, then confirm the pipeline still produces results
+        assert fetch_backend_applications("http://127.0.0.1:9999") is None
+        apps, source = cost._default_portfolio()
+        assert "fixture" in source
+        results = analyze_portfolio(apps)  # uses real resolver tiers -> must not crash
+        assert len(results) == 3
+        assert all(r["app_id"] for r in results)
+
+    def test_missing_fixture_falls_back_to_demo(self, monkeypatch):
+        monkeypatch.setattr(cost, "DEFAULT_FIXTURE_PATH", "Z:/definitely/missing.json")
+        apps, source = cost._default_portfolio()
+        assert "demo" in source
+        assert [a["app_id"] for a in apps] == ["APP_001", "APP_002", "APP_003"]
+
+    def test_csv_portfolio_parse(self, tmp_path):
+        csv_file = tmp_path / "portfolio.csv"
+        header = ("application_id,application_name,cpu_usage,memory_usage,age_years,"
+                  "criticality,compliance_flag,dependency_ids,dependency_count")
+        csv_file.write_text(
+            header + "\n" + "APP001,holistic bandwidth,0.76,0.64,15,Low,1,\"APP089,APP635\",5\n"
+            + "APP002,intuitive e-commerce,0.9,0.19,14,Low,0,0,0\n",
+            encoding="utf-8")
+        apps = parse_csv_portfolio(str(csv_file))
+        assert len(apps) == 2
+        assert apps[0]["application_id"] == "APP001"
+        assert apps[1]["dependency_count"] == "0"
+        out = analyze_application(apps[0], resolver=PricingResolver())
+        assert out["app_id"] == "APP001"  # full pipeline accepts parsed rows
+
 
 class TestCLI:
     def test_cli_demo_output_is_valid_json(self, capsys, monkeypatch, offline_resolver):
@@ -472,6 +711,7 @@ class TestCLI:
         payload = json.loads(captured)
         assert payload["app_count"] == 3
         assert payload["applications"][0]["app_id"] == "APP_001"
+        assert "fixture" in payload["data_source"]
 
     def test_cli_app_filter(self, capsys, monkeypatch, offline_resolver):
         monkeypatch.setattr(cost, "PricingResolver", lambda region="us-east-1", verbose=False: offline_resolver)
@@ -490,6 +730,29 @@ class TestCLI:
         cost.main()
         payload = json.loads(capsys.readouterr().out)
         assert payload["applications"][0]["app_id"] == "A1"
+
+    def test_cli_backend_unreachable_falls_back(self, capsys, monkeypatch, offline_resolver):
+        monkeypatch.setattr(cost, "PricingResolver", lambda region="us-east-1", verbose=False: offline_resolver)
+        monkeypatch.setattr(sys, "argv",
+                            ["cost.py", "--quiet", "--backend", "http://127.0.0.1:9999"])
+        cost.main()
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["app_count"] == 3  # fixture served instead
+        assert "fixture" in payload["data_source"]
+
+    def test_cli_csv_input(self, capsys, monkeypatch, offline_resolver, tmp_path):
+        csv_file = tmp_path / "portfolio.csv"
+        header = ("application_id,application_name,cpu_usage,memory_usage,age_years,"
+                  "criticality,compliance_flag,dependency_ids,dependency_count")
+        csv_file.write_text(header + "\n"
+                            + "APP001,holistic bandwidth,0.76,0.64,15,Low,1,\"APP089,APP635\",5\n",
+                            encoding="utf-8")
+        monkeypatch.setattr(cost, "PricingResolver", lambda region="us-east-1", verbose=False: offline_resolver)
+        monkeypatch.setattr(sys, "argv", ["cost.py", "--quiet", "--csv", str(csv_file)])
+        cost.main()
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["data_source"].startswith("csv")
+        assert payload["applications"][0]["app_id"] == "APP001"
 
 
 # ----------------------------------------------------------------------------

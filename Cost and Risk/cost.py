@@ -26,19 +26,29 @@ module fully functional with zero AWS account; T4 avoids re-downloading on
 every call; T5 guarantees no crash during a live demo.
 
 Usage:
-    python cost.py                       # demo portfolio, prints JSON
-    python cost.py --input apps.json     # analyze a portfolio file
+    python cost.py                       # local fixture portfolio, prints JSON
+    python cost.py --input apps.json     # analyze a portfolio file (native schema)
+    python cost.py --backend URL         # analyze GET {URL}/applications (FastAPI)
+    python cost.py --csv portfolio.csv   # data/processed application_portfolio schema
     python cost.py --app APP_001         # single app by id from the input file
     python cost.py --refresh-pricing     # force-refresh the price cache
+
+Input sources (first match wins):
+    --backend  >  --input  >  --csv  >  example_app_portfolio.json fixture
+
+If --backend is unreachable or empty, the local fixture is used automatically,
+so the module always produces output (fixture -> built-in demo as last resort).
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import gzip
 import json
 import math
 import os
+import ssl
 import sys
 import time
 import urllib.error
@@ -230,6 +240,142 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 
 # ----------------------------------------------------------------------------
+# Payload normalization (backend / CSV / native schemas)
+# ----------------------------------------------------------------------------
+
+# Canonical module field -> accepted alias fields, searched in order.
+# Covers: backend GET /applications records, the Data Engineering
+# application_portfolio CSV schema, and the module's native schema.
+APP_FIELD_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "app_id": ("application_id", "id"),
+    "app_name": ("application_name", "name"),
+    "recommended_instance": ("instance_type", "target_instance", "suggested_instance"),
+    "app_age_years": ("age_years", "application_age_years"),
+    "dependency_count": ("num_dependencies",),
+    "has_compliance_data": ("compliance_flag", "has_compliance", "regulated"),
+    "compliance_frameworks": ("compliance_list",),
+    "is_deprecated_tech": ("is_deprecated", "deprecated"),
+    "tech_stack": ("technology", "runtime", "stack"),
+    "criticality": ("business_criticality",),
+    "aws_region": ("region",),
+}
+
+# Free-text markers of legacy runtimes, used when a payload carries no explicit
+# deprecation flag (e.g. backend technology: "COBOL / Mainframe").
+DEPRECATED_TECH_TOKENS = (
+    "cobol", "mainframe", "vb6", "java 6", "java 7", "weblogic", "websphere",
+)
+
+
+def _first_present(data: Dict[str, Any], keys: Tuple[str, ...]) -> Any:
+    """Value of the first key that exists with a non-empty value, else None."""
+    for key in keys:
+        value = data.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _truthy(value: Any) -> bool:
+    """Bool-ish coercion for flags arriving as bools, 0/1, or 'true'/'false'."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y")
+    if isinstance(value, (int, float)):
+        return value > 0
+    return False
+
+
+def _utilization(value: Any) -> float:
+    """Parse a utilization signal ('0.76', '76%', 90) into a 0-1 ratio."""
+    text = str(value).strip() if value is not None else ""
+    if text.endswith("%"):
+        return min(_safe_float(text[:-1], 0.0) / 100.0, 1.0)
+    number = _safe_float(text, 0.0)
+    return min(number / 100.0 if number > 1.5 else number, 1.0)
+
+
+def default_recommended_instance(cpu_usage: Any = None,
+                                 memory_usage: Any = None) -> str:
+    """Defensible default EC2 size derived from utilization signals.
+
+    Backend (GET /applications) and CSV payloads carry CPU / memory
+    utilization but no instance recommendation, so one is derived from the
+    utilization peak: <25% -> burstable t3.small, <60% -> t3.medium,
+    <80% -> m5.large, anything heavier -> m5.xlarge. No signal at all
+    falls back to the module default t3.medium.
+    """
+    cpu = _utilization(cpu_usage)
+    mem = _utilization(memory_usage)
+    if cpu <= 0 and mem <= 0:
+        return "t3.medium"
+    peak = max(cpu, mem)
+    if peak < 0.25:
+        return "t3.small"
+    if peak < 0.60:
+        return "t3.medium"
+    if peak < 0.80:
+        return "m5.large"
+    return "m5.xlarge"
+
+
+def normalize_app_payload(app_data: Dict[str, Any],
+                          source_format: Optional[str] = None) -> Dict[str, Any]:
+    """Canonicalize any accepted payload into the module's native app schema.
+
+    Accepted payload families (auto-detected via APP_FIELD_ALIASES):
+      - native module schema (example_app_portfolio.json, demo data)
+      - backend Application records from GET /applications
+        (id, name, owner, technology, criticality, dependencies list)
+      - data/processed/application_portfolio CSV rows
+        (application_id, application_name, cpu_usage, memory_usage, age_years,
+         criticality, compliance_flag, dependency_ids, dependency_count)
+
+    Normalization is additive: original keys are preserved and canonical
+    fields are filled in, so downstream consumers see one stable shape.
+    """
+    if not isinstance(app_data, dict):
+        raise TypeError("application payload must be a dict")
+    app = dict(app_data)
+
+    # 1) Alias fields -> canonical fields (never clobber real values)
+    for canonical, aliases in APP_FIELD_ALIASES.items():
+        if _first_present(app, (canonical,)) is not None:
+            continue
+        alias_value = _first_present(app, aliases)
+        if alias_value is not None:
+            app[canonical] = alias_value
+
+    # 2) Backend payloads carry a dependency list instead of a count
+    if _first_present(app, ("dependency_count",)) is None:
+        deps = app.get("dependencies")
+        if isinstance(deps, (list, tuple, set)):
+            app["dependency_count"] = len(deps)
+
+    # 3) Boolean-ish flags may arrive as 0/1 ints or "true"/"false" strings
+    for flag_field in ("has_compliance_data", "is_deprecated_tech"):
+        if flag_field in app and app[flag_field] is not None:
+            app[flag_field] = _truthy(app[flag_field])
+
+    # 4) Sniff deprecated runtimes from free-text stacks when no flag exists
+    if app.get("is_deprecated_tech") is None:
+        stack = str(_first_present(app, ("tech_stack", "technology", "runtime", "stack")) or "")
+        app["is_deprecated_tech"] = any(tok in stack.lower()
+                                        for tok in DEPRECATED_TECH_TOKENS)
+
+    # 5) Instance sizing: explicit hint, else derived from utilization
+    if _first_present(app, ("recommended_instance",)) is None:
+        app["recommended_instance"] = default_recommended_instance(
+            app.get("cpu_usage"), app.get("memory_usage"))
+
+    # 6) Identifier default so every record is complete
+    if not app.get("app_id"):
+        app["app_id"] = "UNKNOWN"
+    return app
+
+
+# ----------------------------------------------------------------------------
 # Pricing resolver
 # ----------------------------------------------------------------------------
 
@@ -237,9 +383,15 @@ def _safe_int(value: Any, default: int = 0) -> int:
 class PricingResolver:
     """Resolves instance-type -> live hourly USD rate via the tier chain."""
 
-    def __init__(self, region: str = "us-east-1", verbose: bool = False):
+    def __init__(self, region: str = "us-east-1", verbose: bool = False,
+                 cpu_usage: Any = None, memory_usage: Any = None):
         self.region = region
         self.verbose = verbose
+        # Optional utilization context from backend/CSV payloads: when the
+        # caller has no explicit instance recommendation, the Query API query
+        # is narrowed further with a memory filter sized from the payload.
+        self._cpu_usage = cpu_usage
+        self._memory_usage = memory_usage
         self._bulk_prices: Optional[Dict[str, float]] = None
         self._bulk_source: Optional[str] = None
         self._unsigned_boto3_dead = False  # memoized: stop retrying a tier that cannot work here
@@ -278,6 +430,16 @@ class PricingResolver:
             location = REGION_LOCATIONS.get(self.region)
             if location:
                 filters.append({"Type": "TERM_MATCH", "Field": "location", "Value": location})
+            # Backend/CSV payloads carry utilization instead of an instance
+            # recommendation; when the queried type is the derived default,
+            # narrow the Query API further by the payload's memory need
+            # (observed memory usage scaled for ~40% headroom, in GiB).
+            derived = default_recommended_instance(self._cpu_usage, self._memory_usage)
+            mem_ratio = _utilization(self._memory_usage)
+            if instance_type == derived and mem_ratio > 0:
+                needed_gib = max(1, math.ceil(mem_ratio / 0.60))
+                filters.append({"Type": "TERM_MATCH", "Field": "memory",
+                                "Value": f"{needed_gib} GiB"})
             resp = client.get_products(ServiceCode="AmazonEC2", Filters=filters, MaxResults=1)
             if not resp.get("PriceList"):
                 return None
@@ -378,6 +540,74 @@ class PricingResolver:
 
 
 # ----------------------------------------------------------------------------
+# Live backend integration + local fallbacks (portfolio loading)
+# ----------------------------------------------------------------------------
+
+# Module's own example portfolio, used when no live data source succeeds.
+DEFAULT_FIXTURE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "example_app_portfolio.json")
+
+
+def fetch_backend_applications(base_url: str, timeout: int = 10) -> Optional[List[dict]]:
+    """GET {base_url}/applications (FastAPI backend) -> list of app dicts.
+
+    Returns None on any failure (connection refused, non-200, bad JSON, empty
+    list) so callers can fall back to local data. Records are returned raw;
+    normalize_app_payload() maps them to the native schema per app.
+    """
+    url = base_url.rstrip("/") + "/applications"
+    try:
+        # HTTPS: tolerate self-signed certs on local dev backends
+        ctx = ssl._create_unverified_context() if url.startswith("https://") else None
+        req = urllib.request.Request(url, headers={
+            "Accept": "application/json",
+            "User-Agent": "cloud-migration-planner-cost-module/1.0",
+        })
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        if isinstance(payload, dict) and isinstance(payload.get("applications"), list):
+            records = payload["applications"]
+        elif isinstance(payload, list):
+            records = payload
+        else:
+            records = None
+        if records:
+            return records
+        return None
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
+        return None
+
+
+def parse_csv_portfolio(path: str) -> List[dict]:
+    """Load the data/processed application_portfolio CSV schema as app dicts.
+
+    Columns are kept verbatim (application_id, application_name, cpu_usage,
+    memory_usage, age_years, criticality, compliance_flag, dependency_ids,
+    dependency_count); normalize_app_payload() maps them to canonical fields
+    per app. Rows with no identifier are skipped.
+    """
+    apps: List[dict] = []
+    with open(path, "r", encoding="utf-8-sig", newline="") as fh:
+        for row in csv.DictReader(fh):
+            if row.get("application_id") or row.get("id"):
+                apps.append(dict(row))
+    return apps
+
+
+def _default_portfolio() -> Tuple[List[dict], str]:
+    """Local fallback chain: example fixture -> built-in demo apps."""
+    try:
+        with open(DEFAULT_FIXTURE_PATH, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        apps = payload if isinstance(payload, list) else payload.get("applications", [])
+        if apps:
+            return apps, "fixture (example_app_portfolio.json)"
+    except Exception:
+        pass
+    return _demo_portfolio(), "built-in demo portfolio"
+
+
+# ----------------------------------------------------------------------------
 # Monte-Carlo cost simulator
 # ----------------------------------------------------------------------------
 
@@ -458,8 +688,11 @@ def calculate_risk_score(app_data: Dict[str, Any]) -> Dict[str, Any]:
         points += pts
         factors.append({"category": category, "points": pts, "detail": detail})
 
-    # 1) Tech age (max 30) - safe parsing: nulls / "unknown" / NaN -> 0
-    age = _safe_float(app_data.get("app_age_years"), 0.0)
+    # 1) Tech age (max 30) - safe parsing: nulls / "unknown" / NaN -> 0.
+    #    Field aliases keep raw backend/CSV payloads scoreable without
+    #    pre-normalization (age_years in the CSV schema).
+    age = _safe_float(_first_present(
+        app_data, ("app_age_years", "age_years", "application_age_years")), 0.0)
     if age > 10:
         add("tech_age", 30, f"Legacy codebase: {age:g} years old (>10)")
     elif age > 5:
@@ -467,8 +700,14 @@ def calculate_risk_score(app_data: Dict[str, Any]) -> Dict[str, Any]:
     else:
         add("tech_age", 0, f"Modern stack: {age:g} years old")
 
-    # 2) Dependency coupling (max 30) - safe parsing: nulls / "unknown" -> 0
-    deps = _safe_int(app_data.get("dependency_count"), 0)
+    # 2) Dependency coupling (max 30) - safe parsing: nulls / "unknown" -> 0.
+    #    Backend payloads carry a dependency list instead of a count.
+    deps = _safe_int(_first_present(
+        app_data, ("dependency_count", "num_dependencies")), 0)
+    if deps == 0 and "dependency_count" not in app_data:
+        dep_list = app_data.get("dependencies")
+        if isinstance(dep_list, (list, tuple, set)):
+            deps = len(dep_list)
     if deps >= 5:
         add("dependencies", 30, f"High coupling: {deps} direct dependencies (>=5)")
     elif deps >= 2:
@@ -476,19 +715,28 @@ def calculate_risk_score(app_data: Dict[str, Any]) -> Dict[str, Any]:
     else:
         add("dependencies", 0, f"Loose coupling: {deps} dependencies")
 
-    # 3) Compliance (max 25)
-    if app_data.get("has_compliance_data"):
-        frameworks = app_data.get("compliance_frameworks") or ["HIPAA/PCI/GDPR"]
+    # 3) Compliance (max 25) - flags arrive as bools, 0/1, or "true"/"false"
+    compliance_flag = _first_present(
+        app_data, ("has_compliance_data", "compliance_flag", "has_compliance", "regulated"))
+    if _truthy(compliance_flag):
+        frameworks = _first_present(
+            app_data, ("compliance_frameworks", "compliance_list")) or ["HIPAA/PCI/GDPR"]
         add("compliance", 25, f"Handles regulated data ({', '.join(map(str, frameworks))})")
     else:
         add("compliance", 0, "No regulated-data workload")
 
-    # 4) Deprecated runtime (max 15)
-    if app_data.get("is_deprecated_tech"):
+    # 4) Deprecated runtime (max 15) - explicit flag wins; else sniff the
+    #    tech-stack text (works for backend 'technology' fields like COBOL)
+    stack = _first_present(app_data, ("tech_stack", "technology", "runtime", "stack"))
+    deprecated_flag = _first_present(
+        app_data, ("is_deprecated_tech", "is_deprecated", "deprecated"))
+    deprecated = (_truthy(deprecated_flag) if deprecated_flag is not None else
+                  any(tok in str(stack or "").lower() for tok in DEPRECATED_TECH_TOKENS))
+    if deprecated:
         add("deprecated_tech", 15,
-            f"Deprecated runtime: {app_data.get('tech_stack') or 'legacy environment'}")
+            f"Deprecated runtime: {stack or 'legacy environment'}")
     else:
-        add("deprecated_tech", 0, f"Supported runtime: {app_data.get('tech_stack') or 'n/a'}")
+        add("deprecated_tech", 0, f"Supported runtime: {stack or 'n/a'}")
 
     # 5) Optional criticality bonus (score is capped at 100 anyway)
     crit = str(app_data.get("criticality") or "").lower()
@@ -526,16 +774,22 @@ def calculate_risk_score(app_data: Dict[str, Any]) -> Dict[str, Any]:
 def analyze_application(app_data: Dict[str, Any],
                         resolver: Optional[PricingResolver] = None,
                         iterations: int = DEFAULT_ITERATIONS) -> Dict[str, Any]:
-    """Full pipeline for one application -> JSON-ready dict."""
+    """Full pipeline for one application -> JSON-ready dict.
+
+    Accepts any supported payload family (native module schema, backend
+    GET /applications records, application_portfolio CSV rows); everything
+    is routed through normalize_app_payload() first.
+    """
+    app = normalize_app_payload(app_data)
     resolver = resolver or PricingResolver()
 
-    instance_type = app_data.get("recommended_instance") or "t3.medium"
-    storage_gb = _safe_float(app_data.get("storage_gb", 50), 50.0)
+    instance_type = app.get("recommended_instance") or "t3.medium"
+    storage_gb = _safe_float(app.get("storage_gb", 50), 50.0)
 
     hourly_rate, price_source = resolver.get_hourly_rate(instance_type)
     cost = run_monte_carlo_simulation(hourly_rate, storage_gb, iterations=iterations,
                                       region=resolver.region)
-    risk = calculate_risk_score(app_data)
+    risk = calculate_risk_score(app)
 
     low = cost["low_5th_percentile_usd"]
     exp = cost["expected_mean_usd"]
@@ -547,8 +801,8 @@ def analyze_application(app_data: Dict[str, Any],
     ) or "no significant drivers"
 
     return {
-        "app_id": app_data.get("app_id", "UNKNOWN"),
-        "app_name": app_data.get("app_name", "Unnamed Application"),
+        "app_id": app.get("app_id", "UNKNOWN"),
+        "app_name": app.get("app_name", "Unnamed Application"),
         "target_aws_instance": instance_type,
         "aws_region": resolver.region,
         "storage_gb": storage_gb,
@@ -571,7 +825,7 @@ def analyze_application(app_data: Dict[str, Any],
         },
         "risk_assessment": risk,
         "summary_for_copilot": (
-            f"{app_data.get('app_name', 'This app')} runs on {instance_type} "
+            f"{app.get('app_name', 'This app')} runs on {instance_type} "
             f"at ${hourly_rate}/hr (price source: {price_source}). Predicted monthly "
             f"cost is ${low}-${high} (90% CI, expected ${exp}) with {storage_gb:g} GB storage. "
             f"Migration risk is {risk['risk_level']} ({risk['risk_score']}/100). "
@@ -623,7 +877,11 @@ def _demo_portfolio() -> List[Dict[str, Any]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Predictive Cost & Risk Simulator (Role 6)")
-    parser.add_argument("--input", help="JSON file with a list of app dicts")
+    parser.add_argument("--backend", metavar="URL",
+                        help="fetch apps from the FastAPI backend (GET URL/applications)")
+    parser.add_argument("--input", help="JSON file with a list of app dicts (native schema)")
+    parser.add_argument("--csv", dest="csv_path", metavar="FILE",
+                        help="portfolio CSV (data/processed application_portfolio schema)")
     parser.add_argument("--app", help="only analyze the app with this app_id")
     parser.add_argument("--region", default="us-east-1")
     parser.add_argument("--iterations", type=int, default=DEFAULT_ITERATIONS)
@@ -633,12 +891,33 @@ def main() -> None:
     parser.add_argument("--quiet", action="store_true", help="no progress logs")
     args = parser.parse_args()
 
-    if args.input:
+    data_source = "n/a"
+    if args.backend:
+        if not args.quiet:
+            print(f"[data] fetching applications from {args.backend}", file=sys.stderr)
+        records = fetch_backend_applications(args.backend)
+        if records:
+            apps, data_source = records, f"backend ({args.backend}/applications)"
+        else:
+            apps, data_source = _default_portfolio()
+            if not args.quiet:
+                print(f"[data] backend unreachable -> falling back to {data_source}",
+                      file=sys.stderr)
+    elif args.input:
         with open(args.input, "r", encoding="utf-8") as fh:
             payload = json.load(fh)
         apps = payload if isinstance(payload, list) else payload.get("applications", [])
+        data_source = f"input file ({args.input})"
+    elif args.csv_path:
+        apps = parse_csv_portfolio(args.csv_path)
+        data_source = f"csv ({args.csv_path})"
     else:
-        apps = _demo_portfolio()
+        apps, data_source = _default_portfolio()
+
+    # Normalize every row to the canonical schema up front so app-id
+    # filtering works uniformly across backend / CSV / native payloads
+    # (raw CSV rows carry application_id, backend records carry id).
+    apps = [normalize_app_payload(a) for a in apps]
 
     if args.app:
         apps = [a for a in apps if a.get("app_id") == args.app]
@@ -656,6 +935,7 @@ def main() -> None:
     output = {
         "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "aws_region": args.region,
+        "data_source": data_source,
         "app_count": len(results),
         "applications": results,
     }

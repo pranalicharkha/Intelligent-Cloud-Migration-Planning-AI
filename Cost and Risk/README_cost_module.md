@@ -19,6 +19,12 @@ python cost.py
 # Analyze your own portfolio file (list, or {"applications": [...]})
 python cost.py --input example_app_portfolio.json
 
+# Live backend data: analyze GET {URL}/applications (falls back to the fixture if unreachable)
+python cost.py --backend http://localhost:8000
+
+# Or analyze the data team's 1,000-app CSV export directly
+python cost.py --csv ../data/processed/application_portfolio_1000.csv
+
 # Single app, another region, custom iterations
 python cost.py --input example_app_portfolio.json --app APP_001 --region eu-west-1 --iterations 1500
 
@@ -35,10 +41,13 @@ python -m pytest test_cost.py -v
 ## How to call it from your own code
 
 ```python
-from cost import analyze_portfolio
+from cost import analyze_portfolio, fetch_backend_applications
 
 results = analyze_portfolio(apps, iterations=2000)
 # results is a list of plain dicts -> json.dumps(results) and ship it
+
+# ...or pull the portfolio straight from the FastAPI backend:
+apps = fetch_backend_applications("http://localhost:8000")
 ```
 
 ## 1. Live pricing — the tier chain
@@ -146,6 +155,11 @@ Per application:
 
 ### Who consumes what
 
+- **Backend (`POST /cost-risk`)** — expects `{application_id, monthly_aws_cost,
+  cost_range{lower, upper}, risk_score}` per app; map from the module output as:
+  `application_id←app_id`, `monthly_aws_cost←cost_simulation_monthly.expected_mean_usd`,
+  `cost_range.lower/upper←low_5th/high_95th_percentile_usd`,
+  `risk_score←risk_assessment.risk_score`.
 - **Frontend Engineer** — `cost_simulation_monthly.{low,expected,high}` for the
   range chart; `risk_assessment.risk_score / risk_level / risk_badge_color` for
   the warning badge; `risk_factors[].detail` for tooltips.
@@ -155,7 +169,9 @@ Per application:
 - **Coordinator / backend** — top-level `generated_at_utc` + `price_source`
   makes results auditable and cacheable; the module is import-safe for Lambda.
 
-### Input contract (what the Data Engineer should send)
+### Input contract — three payload families accepted
+
+**1. Native module schema** (full fidelity — what the Data Engineer / 6R engine should send):
 
 ```jsonc
 {
@@ -172,6 +188,19 @@ Per application:
   "criticality": "mission-critical"       // optional: low | business-critical | mission-critical
 }
 ```
+
+**2. Backend `GET /applications` records** (from `backend/app/models.py`):
+`{id, name, owner, technology, criticality, dependencies[]}`. Aliases map
+automatically (`id→app_id`, `name→app_name`, `len(dependencies)→dependency_count`).
+With no `recommended_instance` supplied, the instance is **derived from
+technology utilization and criticality** (t3 family → m5 → r5, bumped one size
+for mission-critical apps).
+
+**3. Data-pipeline CSV rows** (`data/processed/application_portfolio_1000.csv`):
+`application_id, application_name, cpu_usage, memory_usage, age_years,
+criticality, compliance_flag, dependency_ids, dependency_count` —
+`compliance_flag` truthiness seeds the compliance factor, and utilization
+drives instance sizing as above.
 
 Missing fields are defaulted sensibly (t3.medium, 50 GB, age 0, no compliance) —
 the module never crashes on sparse input. Dirty values are safe too: `null`,
